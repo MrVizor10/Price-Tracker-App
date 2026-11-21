@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { scrapeProduct } from "@/lib/firecrawl";
+import { sendPriceDropAlert } from "@/lib/email";
 
 export async function GET() {
   return NextResponse.json({
@@ -95,6 +98,8 @@ export async function POST(request) {
         results.failed++;
       }
     }
+
+    return NextResponse.json(results);
   } catch (error) {
     console.error("Cron job error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
