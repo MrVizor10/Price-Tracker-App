@@ -37,21 +37,31 @@ export async function POST(request) {
       failed: 0,
       priceChanges: 0,
       alertsSent: 0,
+      errors: [],
     };
 
     for (const product of products) {
+      let stage = "scrape";
+      let priceUpdated = false;
       try {
         const productData = await scrapeProduct(product.url);
 
-        if (!productData.currentPrice) {
-          results.failed++;
-          continue;
+        const rawPrice = productData?.currentPrice;
+        const newPrice = Number(rawPrice);
+        if (
+          rawPrice == null ||
+          (typeof rawPrice !== "number" && typeof rawPrice !== "string") ||
+          (typeof rawPrice === "string" && rawPrice.trim() === "") ||
+          !Number.isFinite(newPrice) ||
+          newPrice < 0
+        ) {
+          throw new Error("Scraper did not return a valid currentPrice");
         }
 
-        const newPrice = parseFloat(productData.currentPrice);
         const oldPrice = parseFloat(product.current_price);
 
-        await supabase
+        stage = "update_product";
+        const { data: updatedProduct, error: updateError } = await supabase
           .from("products")
           .update({
             current_price: newPrice,
@@ -60,23 +70,38 @@ export async function POST(request) {
             image_url: productData.productImageUrl || product.image_url,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", product.id);
+          .eq("id", product.id)
+          .select("id")
+          .single();
+
+        if (updateError) throw updateError;
+        if (!updatedProduct) throw new Error("Product update returned no row");
+        priceUpdated = true;
+        results.updated++;
 
         if (oldPrice !== newPrice) {
-          await supabase.from("price_history").insert({
+          stage = "insert_history";
+          const { error: historyError } = await supabase.from("price_history").insert({
             product_id: product.id,
             price: newPrice,
             currency: productData.currencyCode || product.currency,
           });
 
+          if (historyError) throw historyError;
+
           results.priceChanges++;
 
           if (newPrice < oldPrice) {
+            stage = "lookup_user";
             const {
               data: { user },
+              error: userError,
             } = await supabase.auth.admin.getUserById(product.user_id);
 
+            if (userError) throw userError;
+
             if (user?.email) {
+              stage = "send_alert";
               const emailResult = await sendPriceDropAlert(
                 user.email,
                 product,
@@ -86,16 +111,24 @@ export async function POST(request) {
 
               if (emailResult.success) {
                 results.alertsSent++;
+              } else {
+                throw new Error(
+                  emailResult.error?.message || emailResult.error || "Price drop alert failed",
+                );
               }
             }
           }
         }
 
-        results.updated++;
-        
       } catch (error) {
         console.error(`Error processing product ${product.id}:`, error);
         results.failed++;
+        results.errors.push({
+          productId: product.id,
+          stage,
+          priceUpdated,
+          message: error.message || "Unknown product processing error",
+        });
       }
     }
 
