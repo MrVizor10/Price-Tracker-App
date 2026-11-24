@@ -3,10 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 import { scrapeProduct } from "@/lib/firecrawl";
 import { sendPriceDropAlert } from "@/lib/email";
 
-export async function GET() {
-  return NextResponse.json({
-    message: "Price check endpoint is working. Use POST to trigger",
-  });
+export async function GET(request) {
+  return POST(request);
 }
 
 export async function POST(request) {
@@ -37,31 +35,21 @@ export async function POST(request) {
       failed: 0,
       priceChanges: 0,
       alertsSent: 0,
-      errors: [],
     };
 
     for (const product of products) {
-      let stage = "scrape";
-      let priceUpdated = false;
       try {
         const productData = await scrapeProduct(product.url);
 
-        const rawPrice = productData?.currentPrice;
-        const newPrice = Number(rawPrice);
-        if (
-          rawPrice == null ||
-          (typeof rawPrice !== "number" && typeof rawPrice !== "string") ||
-          (typeof rawPrice === "string" && rawPrice.trim() === "") ||
-          !Number.isFinite(newPrice) ||
-          newPrice < 0
-        ) {
-          throw new Error("Scraper did not return a valid currentPrice");
+        if (!productData.currentPrice) {
+          results.failed++;
+          continue;
         }
 
+        const newPrice = parseFloat(productData.currentPrice);
         const oldPrice = parseFloat(product.current_price);
 
-        stage = "update_product";
-        const { data: updatedProduct, error: updateError } = await supabase
+        await supabase
           .from("products")
           .update({
             current_price: newPrice,
@@ -70,38 +58,23 @@ export async function POST(request) {
             image_url: productData.productImageUrl || product.image_url,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", product.id)
-          .select("id")
-          .single();
-
-        if (updateError) throw updateError;
-        if (!updatedProduct) throw new Error("Product update returned no row");
-        priceUpdated = true;
-        results.updated++;
+          .eq("id", product.id);
 
         if (oldPrice !== newPrice) {
-          stage = "insert_history";
-          const { error: historyError } = await supabase.from("price_history").insert({
+          await supabase.from("price_history").insert({
             product_id: product.id,
             price: newPrice,
             currency: productData.currencyCode || product.currency,
           });
 
-          if (historyError) throw historyError;
-
           results.priceChanges++;
 
           if (newPrice < oldPrice) {
-            stage = "lookup_user";
             const {
               data: { user },
-              error: userError,
             } = await supabase.auth.admin.getUserById(product.user_id);
 
-            if (userError) throw userError;
-
             if (user?.email) {
-              stage = "send_alert";
               const emailResult = await sendPriceDropAlert(
                 user.email,
                 product,
@@ -111,24 +84,15 @@ export async function POST(request) {
 
               if (emailResult.success) {
                 results.alertsSent++;
-              } else {
-                throw new Error(
-                  emailResult.error?.message || emailResult.error || "Price drop alert failed",
-                );
               }
             }
           }
         }
 
+        results.updated++;
       } catch (error) {
         console.error(`Error processing product ${product.id}:`, error);
         results.failed++;
-        results.errors.push({
-          productId: product.id,
-          stage,
-          priceUpdated,
-          message: error.message || "Unknown product processing error",
-        });
       }
     }
 
@@ -138,3 +102,8 @@ export async function POST(request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+
+
+// curl.exe -X POST https://getpricetracker.vercel.app/api/cron/check-prices -H "Authorization: Bearer a0ff0cbce4c052835723072d4dda211a49d065a4dd0b8d9bfcb0ad644673260e"
+// curl.exe -X POST https://localhost:3000/api/cron/check-prices -H "Authorization: Bearer a0ff0cbce4c052835723072d4dda211a49d065a4dd0b8d9bfcb0ad644673260e"
+
