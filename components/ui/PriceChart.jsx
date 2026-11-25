@@ -11,7 +11,6 @@ import {
 } from "recharts";
 import { getPriceHistory } from "@/app/actions";
 import { Loader2 } from "lucide-react";
-import { prod } from "mathjs";
 
 const PriceChart = ({ productId }) => {
     const [data, setData] = useState([])
